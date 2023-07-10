@@ -158,6 +158,7 @@ def eStep(X, muHat, qHat, pHat, M, nStates):
             muHat = nClusters x 1, estimated mu, mixture probs 
             qHat = nClusters x nStates, estimated initial probs
             pHat = nClusters x nStates x nStates, estimated transition matrices
+            M    = nClusters
             nStates  =  # assumed number of states in the chain, alphabet size
 
     outputs: zHat = updated estimates of probability of each cluster
@@ -166,7 +167,7 @@ def eStep(X, muHat, qHat, pHat, M, nStates):
     N = np.shape(X)[0] 
     T = np.shape(X)[1]
     zHat = np.zeros([N,M])
-
+    epsilon=1e-10;
 
     for n in range(N):
         Xn = X[n,:]
@@ -176,7 +177,7 @@ def eStep(X, muHat, qHat, pHat, M, nStates):
             X0 = np.int_(Xn[0])
             qiX0 = qHat[i,X0]
             logprodpi = logprob_of_trajectory(pHat[i,:,:],Xn)
-            lognumerators[i] = np.log(mu_i)+np.log(qiX0)+logprodpi
+            lognumerators[i] = np.log(mu_i)+np.log(qiX0)+logprodpi#+(epsilon)
             zz = np.exp(lognumerators-logsumexp(lognumerators)) # logsum trick here
 
         zHat[n,:] = zz
@@ -216,7 +217,9 @@ def mStep(X, zHat, M, nStates):
     denom = zHat.sum(axis=0)[:,None]
     qHat = np.divide(numerator,denom,out=np.zeros_like(numerator), where=numerator!=0)
 
-    # I don't think looping over clusters first here is ideal because you have to recompute for every trajectory but this is easiest.. if too slow can fix later  
+    # I don't think looping over clusters first here is ideal because you have 
+    # to recompute for every trajectory but this is easiest.. if too slow can 
+    # fix later  
     for i in range(M):
         numerator = np.zeros([nStates,nStates])
         denom = np.zeros(nStates,)
@@ -235,8 +238,26 @@ def mStep(X, zHat, M, nStates):
 
     return muHat, qHat, pHat
     
+def computeLogL(X, zHat, muHat, qHat, pHat):
+    N = X.shape[0]
+    T = X.shape[0]
+    M = len(muHat)
+    logp = 0
+    for n in range(N):
+        pn = 0
+        Xn = X[n,:]
+        X0 = Xn[0]
+        for m in range(M):
+            z_nm = zHat[n,m]
+            q_mn = qHat[m,np.int_(X0)]
+            mu_m = muHat[m]
+            t_mn = pHat[m,:,:]
+            lp_mn = logprob_of_trajectory(t_mn,Xn)
+            pn = pn+np.exp(np.log(z_nm)+np.log(q_mn)+np.log(mu_m)+lp_mn)
+        logp = logp+np.log(pn)
+    return logp 
 
-def doEM(X, M, nStates, tol):
+def doEM(X, M, nStates, tol, maxSteps=1000):
     """
     doEM performs our EM algorithm for a trajectory, stopping when the next step hits a level of tolerance.
 
@@ -246,6 +267,7 @@ def doEM(X, M, nStates, tol):
     inputs: X = N x T matrix, N trajectories of length T, 
             M = #, number of clusters
             tol  =  absolute err level (in 2-norm), of when Z, mu, q stop changing by this amount, halt the algorithm
+            maxsteps = max number of steps, override tol
 
 
     outputs: zHat = updated estimates of probability of each cluster
@@ -266,9 +288,10 @@ def doEM(X, M, nStates, tol):
     zHatdiff = 1.0
     qHatdiff = 1.0
     muHatdiff = 1.0
+    logLseq = []
 
     
-    while zHatdiff>tol and muHatdiff>tol and qHatdiff >tol:
+    while (zHatdiff>tol or muHatdiff>tol or qHatdiff >tol) and steps<maxSteps:
         steps = steps+1
         muHatnew, qHatnew, pHat = mStep(X,zHat,M, nStates)
 
@@ -282,7 +305,38 @@ def doEM(X, M, nStates, tol):
         zHatnew = eStep(X,muHat, qHat, pHat, M, nStates)
         zHatdiff = np.linalg.norm(zHatnew-zHat,ord=2)
         zHat = zHatnew
-    return zHat, muHat, qHat, pHat, steps
+        logL = computeLogL(X,zHat,muHat, qHat,pHat)
+        logLseq = np.append(logLseq, logL)
+    #print(steps)
+    #print(logLseq)
+    return zHat, muHat, qHat, pHat, steps, logLseq
+
+
+def doEM_multirun(X, M, nStates, tol,EMruns, maxSteps=1000):
+    N = np.shape(X)[0] 
+
+    finalLogL_best = float('-inf')
+
+    for s in range(EMruns):
+        zHat, muHat, qHat, pHat, steps, logLseq= doEM(X, M, nStates, tol, maxSteps)
+        finalLogL = logLseq[-1]
+        #print(logLseq[-1])
+        if finalLogL>=finalLogL_best:    
+            zHat_best = zHat
+            muHat_best = muHat
+            qHat_best = qHat
+            pHat_best = pHat
+            finalLogL_best = finalLogL
+            stepsBest = steps
+    if stepsBest==maxSteps:
+        maxFlag=1
+    else:
+        maxFlag=0
+         
+    return zHat_best, muHat_best, qHat_best, pHat_best, maxFlag
+
+
+
     
 def generateChains(nStates, nClusters):
     """
@@ -297,7 +351,6 @@ def generateChains(nStates, nClusters):
 
     outputs: transition_matrices = nClusters x nStates x nStates, randomly generate transition matrices
     initDists = nClusters x nStates = q, initial probability densities
-, initDists
     """    
     transition_matrices = np.zeros([nClusters, nStates,nStates])
     initDists = np.zeros([nClusters, nStates]) 
